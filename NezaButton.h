@@ -1,3 +1,5 @@
+
+#ifndef NezaButton_H
 #define NezaButton_H
 
 #include <Arduino.h>
