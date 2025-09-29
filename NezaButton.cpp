@@ -1,3 +1,4 @@
+
 #include "NezaButton.h"
 
 // Delegating constructors
@@ -10,73 +11,78 @@ NezaButton::NezaButton(uint8_t buttonPin, bool activeType)
 NezaButton::NezaButton(uint8_t buttonPin, bool activeType, bool internalPull)
 {
   _pin        = buttonPin;
-  _activeHigh = activeType;
+  _activeHigh = activeType ? 1 : 0;
 
-  // Start raw-normalized state as "inactive"
-  _btnState   = !_activeHigh;
+  // Start raw-normalized state as "inactive" (only matters for first edge timing)
+  _btnState   = _activeHigh ? 0 : 1; // normalized inactive is 0; initial value is used only for first compare
   _lastState  = _btnState;
 
   // Public flags
-  depressed   = false;
-  changed     = false;
+  depressed   = 0;
+  changed     = 0;
 
   // Clicks / counters
   _clickCount = 0;
   clicks      = 0;
 
-  // 16-bit timebase (we use modular subtraction)
-  _lastBounceTime = 0;
+  // Timers
+  _lastBounceTime  = 0;
+  _stateChangeTime = 0;
 
-  // Configure input mode
-  if (_activeHigh == LOW && internalPull == NEZABTN_PULLUP) {
-    pinMode(_pin, INPUT_PULLUP);
-  } else if (_activeHigh == HIGH && internalPull == NEZABTN_PULLDOWN) {
-    pinMode(_pin, INPUT_PULLDOWN);
+  // Configure input mode (ESP32 supports both PULLUP and PULLDOWN on many pins; avoid 34..39)
+  if (!_activeHigh && internalPull == NEZABTN_PULLUP) {
+    pinMode(_pin, INPUT_PULLUP);     // active LOW + pull-up
+  } else if (_activeHigh && internalPull == NEZABTN_PULLDOWN) {
+    pinMode(_pin, INPUT_PULLDOWN);   // active HIGH + pull-down
   } else {
-    pinMode(_pin, INPUT);
+    pinMode(_pin, INPUT);            // external pull or none
   }
 }
 
 void NezaButton::Update()
 {
-  // Snapshot time (lower 16 bits are enough for our intervals)
+  // One-shot events per Update() for compatibility
+  changed = 0;
+  clicks  = 0;
+
   const uint16_t now16 = (uint16_t)millis();
 
-  // Read raw and normalize to "true = active"
-  bool raw = (digitalRead(_pin) != 0);
-  if (!_activeHigh) raw = !raw;
+  // Read raw and normalize to "1 = active"
+  uint8_t raw = digitalRead(_pin) ? 1 : 0;
+  if (!_activeHigh) raw ^= 1; // invert if active LOW
 
-  // Any edge? reset bounce timer (modular arithmetic with uint16_t)
+  // Any instantaneous edge? reset bounce timer
   if (raw != _lastState) {
     _lastBounceTime = now16;
   }
+  _lastState = raw;
+  _btnState  = raw;
 
-  _btnState = raw;
-
-  // If stable beyond debounceTime, accept the level
+  // Debounce: accept the level if stable beyond debounceTime
   if ((uint16_t)(now16 - _lastBounceTime) > debounceTime && (_btnState != depressed)) {
     depressed = _btnState;
+    _stateChangeTime = now16;        // debounced change time
+
     if (depressed) {
-      // New press within current multi-click window
-      if (_clickCount < INT8_MAX) ++_clickCount;
+      if (_clickCount < 127) ++_clickCount; // avoid overflow
     }
   }
 
-  // Keep "changed" only for latched results (click group complete or long press)
-  changed = (_lastState != _btnState) ? false : changed;
-  _lastState = _btnState;
-
   // Finalize short clicks once released and multi-click window elapsed
-  if (!depressed && (uint16_t)(now16 - _lastBounceTime) > multiclickTime) {
+  if (!depressed &&
+      _clickCount > 0 &&
+      (uint16_t)(now16 - _stateChangeTime) > multiclickTime) {
     clicks = _clickCount;   // 1, 2, 3...
     _clickCount = 0;
-    if (clicks != 0) changed = true;
+    changed = 1;
   }
 
   // Finalize long press once held beyond longClickTime (negative clicks)
-  if (depressed && (uint16_t)(now16 - _lastBounceTime) > longClickTime) {
+  if (depressed &&
+      _clickCount > 0 &&
+      (uint16_t)(now16 - _stateChangeTime) > longClickTime) {
     clicks = (int8_t)(0 - _clickCount); // e.g., -1 for long press
     _clickCount = 0;
-    if (clicks != 0) changed = true;
-  }
+    changed = 1;
+ }
 }
