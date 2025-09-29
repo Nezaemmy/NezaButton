@@ -1,4 +1,3 @@
-#ifndef NezaButton_H
 #define NezaButton_H
 
 #include <Arduino.h>
@@ -17,33 +16,29 @@ class NezaButton
     // Call this frequently in loop()
     void Update();
 
-    // --------- Public status (packed to save RAM) ----------
-    bool depressed : 1;  // Debounced button state (true = active)
-    bool changed  : 1;   // State change flag (set when clicks is finalized)
+    // --------- Public status (fast uint8_t flags) ----------
+    uint8_t depressed;   // Debounced state (1 = active)
+    uint8_t changed;     // 1 for the Update() when clicks is latched
 
-    // --------- Tunable timings (downsized types) -----------
-    // Matches your declared maxima: 50 ms, 500 ms, 10000 ms
-    uint8_t  debounceTime;    // 0..255 ms (you use <= 50 ms)
-    uint16_t multiclickTime;  // 0..65535 ms (you use <= 500 ms)
-    uint16_t longClickTime;   // 0..65535 ms (you use <= 10000 ms)
+    // --------- Tunable timings (with defaults) -------------
+    uint8_t  debounceTime;    
+    uint16_t multiclickTime;  
+    uint16_t longClickTime;   
 
-    // Short/long click results (negative => long press)
+    // Short/long click results (negative => long press). One-shot per Update().
     int8_t clicks;
 
   private:
-    // Keep layout tight to minimize padding
-    uint8_t _pin;             // GPIO pin
+    uint8_t _pin;
 
-    // State bits (packed)
-    bool _activeHigh : 1;     // true: active HIGH, false: active LOW
-    bool _btnState   : 1;     // instantaneous (normalized) raw state
-    bool _lastState  : 1;     // previous instantaneous state
+    // State bytes (fast)
+    uint8_t _activeHigh;      // 1: active HIGH, 0: active LOW
+    uint8_t _btnState;        // instantaneous normalized raw (1=active)
+    uint8_t _lastState;       // last instantaneous normalized raw
 
-    int8_t   _clickCount;     // accumulates clicks while depressed
-    uint16_t _lastBounceTime; // lower 16 bits of millis()
-
-    // NOTE: We rely on modular arithmetic with uint16_t:
-    // (uint16_t)(now - then) works across wrap, up to ~65.536s.
+    int8_t   _clickCount;       // counts presses within a group
+    uint16_t _lastBounceTime;   // lower 16 bits of millis()
+    uint16_t _stateChangeTime;  // debounced change time (for long/multi)
 };
 
 #endif
