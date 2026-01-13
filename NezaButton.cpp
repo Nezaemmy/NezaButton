@@ -1,44 +1,86 @@
 
 #include "NezaButton.h"
 
-// Delegating constructors
+// -------------------  constructors  -------------------
 NezaButton::NezaButton(uint8_t buttonPin)
-  : NezaButton(buttonPin, LOW, false) {}
+  : NezaButton(buttonPin, ActiveLevel::ActiveLow, PullMode::None) {}
 
 NezaButton::NezaButton(uint8_t buttonPin, bool activeType)
-  : NezaButton(buttonPin, activeType, false) {}
+  : NezaButton(buttonPin,
+               activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
+               PullMode::None) {}
 
 NezaButton::NezaButton(uint8_t buttonPin, bool activeType, bool internalPull)
+  : NezaButton(buttonPin,
+               activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
+               // internalPull == HIGH => PullUp, LOW => PullDown
+               (internalPull == NEZABTN_PULLUP) ? PullMode::PullUp : PullMode::PullDown) {}
+
+
+NezaButton::NezaButton(uint8_t buttonPin, ActiveLevel active, PullMode pull)
 {
   _pin        = buttonPin;
-  _activeHigh = activeType ? 1 : 0;
+  _activeHigh = (active == ActiveLevel::ActiveHigh) ? 1 : 0;
 
-  // Start raw-normalized state as "inactive" (only matters for first edge timing)
-  _btnState   = _activeHigh ? 0 : 1; // normalized inactive is 0; initial value is used only for first compare
-  _lastState  = _btnState;
+  debounceTime   = 50;    // ms
+  multiclickTime = 400;   // ms
+  longClickTime  = 1500;  // ms
 
-  // Public flags
-  depressed   = 0;
-  changed     = 0;
+  // Public one-shot / status flags
+  depressed = 0;
+  changed   = 0;
+  clicks    = 0;
 
-  // Clicks / counters
+  // Internal counters/timers
   _clickCount = 0;
-  clicks      = 0;
-
-  // Timers
   _lastBounceTime  = 0;
   _stateChangeTime = 0;
 
-  // Configure input mode (ESP32 supports both PULLUP and PULLDOWN on many pins; avoid 34..39)
-  if (!_activeHigh && internalPull == NEZABTN_PULLUP) {
-    pinMode(_pin, INPUT_PULLUP);     // active LOW + pull-up
-  } else if (_activeHigh && internalPull == NEZABTN_PULLDOWN) {
-    pinMode(_pin, INPUT_PULLDOWN);   // active HIGH + pull-down
+  // Configure input mode (pull-up/pull-down/none)
+  configurePin_(active, pull);
+
+  // Read *actual* initial pin state after pinMode()
+  // Normalize: 1 = pressed/active
+  const uint16_t now16 = (uint16_t)millis();
+
+  uint8_t raw = readNormalized_();
+  _btnState = raw;
+  _lastState = raw;
+  depressed = raw;
+
+  // Avoid “phantom” timing on first Update()
+  _lastBounceTime  = now16;
+  _stateChangeTime = now16;
+
+  // IMPORTANT: do not auto-count a click if button is held at boot
+  _clickCount = 0;
+}
+
+
+// ------------------- Helpers -------------------
+void NezaButton::configurePin_(ActiveLevel active, PullMode pull)
+{
+  // ESP32 supports INPUT_PULLUP and INPUT_PULLDOWN on many GPIOs.
+  // If pull mode doesn't match active logic, we leave INPUT (external pull expected).
+  if (active == ActiveLevel::ActiveLow && pull == PullMode::PullUp) {
+    pinMode(_pin, INPUT_PULLUP);
+  } else if (active == ActiveLevel::ActiveHigh && pull == PullMode::PullDown) {
+    pinMode(_pin, INPUT_PULLDOWN);
   } else {
-    pinMode(_pin, INPUT);            // external pull or none
+    pinMode(_pin, INPUT);
   }
 }
 
+uint8_t NezaButton::readNormalized_() const
+{
+  // Read raw and normalize to "1 = active"
+  uint8_t raw = digitalRead(_pin) ? 1 : 0;
+  if (!_activeHigh) raw ^= 1; // invert if active LOW
+  return raw;
+}
+
+
+// ------------------- Main Update() -------------------
 void NezaButton::Update()
 {
   // One-shot events per Update() for compatibility
@@ -47,9 +89,7 @@ void NezaButton::Update()
 
   const uint16_t now16 = (uint16_t)millis();
 
-  // Read raw and normalize to "1 = active"
-  uint8_t raw = digitalRead(_pin) ? 1 : 0;
-  if (!_activeHigh) raw ^= 1; // invert if active LOW
+  uint8_t raw = readNormalized_();
 
   // Any instantaneous edge? reset bounce timer
   if (raw != _lastState) {
@@ -84,5 +124,6 @@ void NezaButton::Update()
     clicks = (int8_t)(0 - _clickCount); // e.g., -1 for long press
     _clickCount = 0;
     changed = 1;
- }
+  }
 }
+
