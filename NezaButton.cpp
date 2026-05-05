@@ -1,112 +1,180 @@
-
 #include "NezaButton.h"
-// -------------------  constructors  -------------------
+
+// ------------------- Constructors -------------------
+
 NezaButton::NezaButton(uint8_t buttonPin)
-  : NezaButton(buttonPin, ActiveLevel::ActiveLow, PullMode::None) {}
+  : NezaButton(buttonPin, ActiveLevel::ActiveLow, PullMode::None)
+{
+}
+
 NezaButton::NezaButton(uint8_t buttonPin, bool activeType)
-  : NezaButton(buttonPin,
-               activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
-               PullMode::None) {}
+  : NezaButton(
+      buttonPin,
+      activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
+      PullMode::None
+    )
+{
+}
+
 NezaButton::NezaButton(uint8_t buttonPin, bool activeType, bool internalPull)
-  : NezaButton(buttonPin,
-               activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
-               // internalPull == HIGH => PullUp, LOW => PullDown
-               (internalPull == NEZABTN_PULLUP) ? PullMode::PullUp : PullMode::PullDown) {}
+  : NezaButton(
+      buttonPin,
+      activeType ? ActiveLevel::ActiveHigh : ActiveLevel::ActiveLow,
+      (internalPull == NEZABTN_PULLUP) ? PullMode::PullUp : PullMode::PullDown
+    )
+{
+}
+
 NezaButton::NezaButton(uint8_t buttonPin, ActiveLevel active, PullMode pull)
 {
-  _pin        = buttonPin;
+  _pin = buttonPin;
+
+  _activeLevel = active;
+  _pullMode = pull;
   _activeHigh = (active == ActiveLevel::ActiveHigh) ? 1 : 0;
-  debounceTime   = 50;    // ms
-  multiclickTime = 400;   // ms
-  longClickTime  = 1500;  // ms
-  // Public one-shot / status flags
+
+  debounceTime   = 50;
+  multiclickTime = 400;
+  longClickTime  = 1500;
+
   depressed = 0;
   changed   = 0;
   clicks    = 0;
-  // Internal counters/timers
+
+  _begun = 0;
+
+  _lastState = 0;
   _clickCount = 0;
-  _longFired  = 0;
-  _lastBounceTime  = 0;
+  _longFired = 0;
+
+  _lastBounceTime = 0;
   _stateChangeTime = 0;
-  // Configure input mode (pull-up/pull-down/none)
-  configurePin_(active, pull);
-  // Read *actual* initial pin state after pinMode()
-  // Normalize: 1 = pressed/active
-  const uint16_t now16 = (uint16_t)millis();
-  uint8_t raw = readNormalized_();
-  _lastState = raw;
-  depressed  = raw;
-  // Avoid "phantom" timing on first Update()
-  _lastBounceTime  = now16;
-  _stateChangeTime = now16;
-  // IMPORTANT: do not auto-count a click if button is held at boot
-  _clickCount = 0;
 }
-// ------------------- Helpers -------------------
-void NezaButton::configurePin_(ActiveLevel active, PullMode pull)
+
+// ------------------- begin() -------------------
+
+void NezaButton::begin()
 {
-  // ESP32 supports INPUT_PULLUP and INPUT_PULLDOWN on many GPIOs.
-  // If pull mode doesn't match active logic, we leave INPUT (external pull expected).
-  if (active == ActiveLevel::ActiveLow && pull == PullMode::PullUp) {
+  configurePin_();
+
+  const uint32_t now = millis();
+
+  uint8_t raw = readNormalized_();
+
+  _lastState = raw;
+  depressed = raw;
+
+  changed = 0;
+  clicks = 0;
+
+  _clickCount = 0;
+  _longFired = 0;
+
+  _lastBounceTime = now;
+  _stateChangeTime = now;
+
+  _begun = 1;
+}
+
+// ------------------- Private helpers -------------------
+
+void NezaButton::configurePin_()
+{
+  if (_activeLevel == ActiveLevel::ActiveLow && _pullMode == PullMode::PullUp) {
     pinMode(_pin, INPUT_PULLUP);
-  } else if (active == ActiveLevel::ActiveHigh && pull == PullMode::PullDown) {
-    pinMode(_pin, INPUT_PULLDOWN);
-  } else {
+  }
+  else if (_activeLevel == ActiveLevel::ActiveHigh && _pullMode == PullMode::PullDown) {
+    #if defined(INPUT_PULLDOWN)
+      pinMode(_pin, INPUT_PULLDOWN);
+    #else
+      // Some boards do not support internal pulldown.
+      // Use an external pulldown resistor on those boards.
+      pinMode(_pin, INPUT);
+    #endif
+  }
+  else {
     pinMode(_pin, INPUT);
   }
 }
+
 uint8_t NezaButton::readNormalized_() const
 {
-  // Read raw and normalize to "1 = active"
   uint8_t raw = digitalRead(_pin) ? 1 : 0;
-  if (!_activeHigh) raw ^= 1; // invert if active LOW
+
+  // Normalize: 1 always means pressed/active.
+  if (!_activeHigh) {
+    raw ^= 1;
+  }
+
   return raw;
 }
+
 // ------------------- Main Update() -------------------
+
 void NezaButton::Update()
 {
-  // One-shot events per Update() for compatibility
-  changed = 0;
-  clicks  = 0;
-  const uint16_t now16 = (uint16_t)millis();
-  // Use raw directly — no need to cache in a member between calls
-  uint8_t raw = readNormalized_();
-  // Any instantaneous edge? reset bounce timer
-  if (raw != _lastState) {
-    _lastBounceTime = now16;
+  // Compatibility fallback:
+  // If begin() was not called in setup(), call it automatically here.
+  if (!_begun) {
+    begin();
   }
+
+  // One-shot event flags.
+  changed = 0;
+  clicks = 0;
+
+  const uint32_t now = millis();
+  uint8_t raw = readNormalized_();
+
+  // Instantaneous edge detected, reset debounce timer.
+  if (raw != _lastState) {
+    _lastBounceTime = now;
+  }
+
   _lastState = raw;
-  // Debounce: accept the level if stable beyond debounceTime
-  if ((uint16_t)(now16 - _lastBounceTime) > debounceTime && (raw != depressed)) {
+
+  // Accept new state only after debounce time.
+  if ((now - _lastBounceTime) >= debounceTime && raw != depressed) {
     depressed = raw;
-    _stateChangeTime = now16;        // debounced change time
+    _stateChangeTime = now;
+
+    // Count only press edges.
     if (depressed) {
-      if (_clickCount < 127) ++_clickCount; // avoid overflow
+      if (_clickCount < 127) {
+        ++_clickCount;
+      }
     }
   }
-  // Finalize long press once held beyond longClickTime (fires once per press via _longFired)
+
+  // Long press detection.
+  // Examples:
+  // _clickCount = 1 -> clicks = -1
+  // _clickCount = 2 -> clicks = -2
+  // _clickCount = 5 -> clicks = -5
   if (depressed &&
       _clickCount > 0 &&
       !_longFired &&
-      (uint16_t)(now16 - _stateChangeTime) > longClickTime)
+      (now - _stateChangeTime) >= longClickTime)
   {
-    clicks     = (int8_t)(0 - _clickCount); // e.g. -1 for a single long press
+    clicks = -_clickCount;
     _clickCount = 0;
-    _longFired  = 1;   // block short-click from firing on subsequent release
-    changed    = 1;
+    _longFired = 1;
+    changed = 1;
   }
-  // Finalize short clicks once released and multi-click window elapsed.
-  // _longFired guard prevents a long press from also counting as short clicks.
+
+  // Short click / multi-click detection.
+  // Fires only after button is released and multiclick window has elapsed.
   if (!depressed &&
       _clickCount > 0 &&
       !_longFired &&
-      (uint16_t)(now16 - _stateChangeTime) > multiclickTime)
+      (now - _stateChangeTime) >= multiclickTime)
   {
-    clicks     = _clickCount;   // 1, 2, 3 ...
+    clicks = _clickCount;
     _clickCount = 0;
-    changed    = 1;
+    changed = 1;
   }
-  // Clear _longFired once the button is released and clickCount drained
+
+  // Reset long-press lock after release.
   if (!depressed && _clickCount == 0) {
     _longFired = 0;
   }
